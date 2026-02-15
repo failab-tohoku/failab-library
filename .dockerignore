@@ -1,0 +1,21 @@
+.git
+.gitignore
+.DS_Store
+
+# Frontend artifacts
+frontend/node_modules
+frontend/dist
+frontend/.vite
+
+# Python cache / env
+**/__pycache__
+**/*.pyc
+**/*.pyo
+.venv
+venv
+backend/.venv
+backend/venv
+
+# Local runtime artifacts
+backend/app/resources/search.db
+*.log
