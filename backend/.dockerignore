@@ -1,0 +1,8 @@
+app/resources/
+app/.DS_Store
+app/**/__pycache__/
+app/**/*.pyc
+app/**/*.pyo
+scripts/__pycache__/
+scripts/**/*.pyc
+scripts/**/*.pyo

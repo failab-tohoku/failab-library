@@ -1,7 +1,10 @@
 import os
 import re
 import sqlite3
+import threading
+import time
 from contextlib import closing
+from urllib.parse import quote
 
 import fitz
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
@@ -38,21 +41,97 @@ os.makedirs(THUMB_DIR, exist_ok=True)
 TOKENS = set()
 
 
+def parse_bool_env(name: str, default: bool):
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+COOKIE_SECURE = parse_bool_env("COOKIE_SECURE", True)
+LOGIN_RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("LOGIN_RATE_LIMIT_WINDOW_SECONDS", "300"))
+LOGIN_RATE_LIMIT_MAX_ATTEMPTS = int(os.getenv("LOGIN_RATE_LIMIT_MAX_ATTEMPTS", "5"))
+LOGIN_RATE_LIMIT_BLOCK_SECONDS = int(os.getenv("LOGIN_RATE_LIMIT_BLOCK_SECONDS", "300"))
+SEARCH_INDEX_SYNC_MIN_INTERVAL_SECONDS = int(
+    os.getenv("SEARCH_INDEX_SYNC_MIN_INTERVAL_SECONDS", "30")
+)
+PREWARM_THUMBNAILS_ON_STARTUP = parse_bool_env("PREWARM_THUMBNAILS_ON_STARTUP", True)
+
+_login_attempts: dict[tuple[str, str], list[float]] = {}
+_login_blocked_until: dict[tuple[str, str], float] = {}
+_search_sync_lock = threading.Lock()
+_search_last_synced_at = 0.0
+
+
+def get_client_ip(request: Request):
+    real_ip = request.headers.get("x-real-ip")
+    if real_ip:
+        return real_ip.strip()
+    if request.client and request.client.host:
+        return request.client.host
+    return "unknown"
+
+
+def is_login_blocked(key: tuple[str, str], now: float):
+    blocked_until = _login_blocked_until.get(key, 0.0)
+    if blocked_until > now:
+        return int(blocked_until - now)
+    if blocked_until:
+        _login_blocked_until.pop(key, None)
+    return 0
+
+
+def register_login_failure(key: tuple[str, str], now: float):
+    cutoff = now - LOGIN_RATE_LIMIT_WINDOW_SECONDS
+    attempts = [t for t in _login_attempts.get(key, []) if t >= cutoff]
+    attempts.append(now)
+    _login_attempts[key] = attempts
+    if len(attempts) >= LOGIN_RATE_LIMIT_MAX_ATTEMPTS:
+        _login_blocked_until[key] = now + LOGIN_RATE_LIMIT_BLOCK_SECONDS
+        _login_attempts.pop(key, None)
+
+
+def clear_login_failures(key: tuple[str, str]):
+    _login_attempts.pop(key, None)
+    _login_blocked_until.pop(key, None)
+
+
 @app.post("/login")
-def login(response: Response, form: OAuth2PasswordRequestForm = Depends()):
+def login(
+    request: Request, response: Response, form: OAuth2PasswordRequestForm = Depends()
+):
+    now = time.time()
+    key = (get_client_ip(request), form.username.strip())
+    blocked_seconds = is_login_blocked(key, now)
+    if blocked_seconds > 0:
+        raise HTTPException(
+            status_code=429, detail=f"too many login attempts; retry in {blocked_seconds}s"
+        )
+
     user = authenticate_user(form.username, form.password)
     if not user:
+        register_login_failure(key, now)
         raise HTTPException(status_code=401)
+
+    clear_login_failures(key)
     token = create_access_token({"sub": user["username"], "role": user["role"]})
     response.set_cookie(
         key="access_token",
         value=token,
         httponly=True,
         samesite="lax",
-        secure=False,
+        secure=COOKIE_SECURE,
         max_age=60 * 60,
     )
-    return {"access_token": token, "token_type": "bearer"}
+    return {"token_type": "bearer"}
+
+
+@app.post("/logout")
+def logout(response: Response):
+    response.delete_cookie(
+        key="access_token", httponly=True, samesite="lax", secure=COOKIE_SECURE
+    )
+    return {"ok": True}
 
 
 def generate_thumbnail(pdf_path, thumb_path):
@@ -64,6 +143,21 @@ def generate_thumbnail(pdf_path, thumb_path):
     zoom = min(max(zoom, 0.3), 1.0)
     pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
     pix.save(thumb_path, jpg_quality=72)
+
+
+def prewarm_thumbnails():
+    pdf_files = [f for f in os.listdir(PDF_DIR) if f.lower().endswith(".pdf")]
+    for pdf_file in pdf_files:
+        file_stem, _ = os.path.splitext(pdf_file)
+        thumb_name = f"{file_stem}.jpg"
+        thumb_path = os.path.join(THUMB_DIR, thumb_name)
+        if os.path.exists(thumb_path):
+            continue
+        try:
+            generate_thumbnail(os.path.join(PDF_DIR, pdf_file), thumb_path)
+        except Exception as e:  # noqa: BLE001
+            # Continue startup even if a specific thumbnail cannot be generated.
+            print(f"[startup] thumbnail generation failed: {pdf_file} ({e})")
 
 
 def get_db_connection():
@@ -174,6 +268,36 @@ def sync_search_index():
         index_pdf(pdf_id)
 
 
+def maybe_sync_search_index(force: bool = False):
+    global _search_last_synced_at
+
+    now = time.time()
+    if (
+        not force
+        and SEARCH_INDEX_SYNC_MIN_INTERVAL_SECONDS > 0
+        and now - _search_last_synced_at < SEARCH_INDEX_SYNC_MIN_INTERVAL_SECONDS
+    ):
+        return False
+
+    acquired = _search_sync_lock.acquire(blocking=False)
+    if not acquired:
+        return False
+
+    try:
+        now = time.time()
+        if (
+            not force
+            and SEARCH_INDEX_SYNC_MIN_INTERVAL_SECONDS > 0
+            and now - _search_last_synced_at < SEARCH_INDEX_SYNC_MIN_INTERVAL_SECONDS
+        ):
+            return False
+        sync_search_index()
+        _search_last_synced_at = time.time()
+        return True
+    finally:
+        _search_sync_lock.release()
+
+
 def build_fts_query(q: str):
     normalized = q.strip()
     if not normalized:
@@ -192,12 +316,14 @@ def build_fts_query(q: str):
 @app.on_event("startup")
 def startup():
     init_search_db()
-    sync_search_index()
+    maybe_sync_search_index(force=True)
+    if PREWARM_THUMBNAILS_ON_STARTUP:
+        prewarm_thumbnails()
 
 
 @app.get("/pdfs")
 def list_pdfs(user=Depends(get_current_user)):
-    sync_search_index()
+    maybe_sync_search_index(force=False)
     pdfs = []
 
     for file in os.listdir(PDF_DIR):
@@ -241,10 +367,14 @@ def get_pdf(pdf_id: str, request: Request):
     if not os.path.exists(path):
         raise HTTPException(status_code=404)
 
-    return FileResponse(
-        path,
-        media_type="application/pdf",
-        headers={"Cache-Control": "private, max-age=300"},
+    safe_pdf_id = quote(pdf_id, safe="")
+    return Response(
+        status_code=200,
+        headers={
+            "X-Accel-Redirect": f"/_protected_pdfs/{safe_pdf_id}",
+            "Content-Type": "application/pdf",
+            "Cache-Control": "private, max-age=300",
+        },
     )
 
 
@@ -276,7 +406,7 @@ def search_pdfs(
     if per_page > 100:
         per_page = 100
 
-    sync_search_index()
+    maybe_sync_search_index(force=False)
     match_query = build_fts_query(q)
     offset = (page - 1) * per_page
 
@@ -344,7 +474,7 @@ def search_pdf_details(
     if per_page > 100:
         per_page = 100
 
-    sync_search_index()
+    maybe_sync_search_index(force=False)
     match_query = build_fts_query(q)
     offset = (page - 1) * per_page
 
