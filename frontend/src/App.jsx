@@ -71,9 +71,10 @@ export default function App() {
   const [selectedPdf, setSelectedPdf] = useState(initialRoute.selectedPdf);
   const [detailPage, setDetailPage] = useState(initialRoute.detailPage);
 
-  const [token, setToken] = useState(localStorage.getItem("token"));
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [isLoadingPdfs, setIsLoadingPdfs] = useState(false);
 
   const [pdfs, setPdfs] = useState([]);
   const [current, setCurrent] = useState(null);
@@ -97,12 +98,12 @@ export default function App() {
 
   const thumbnailUrls = useMemo(() => {
     const map = {};
-    if (!token) return map;
+    if (!isAuthenticated) return map;
     for (const p of pdfs) {
       map[p.id] = buildAuthUrl(p.thumbnail_url);
     }
     return map;
-  }, [pdfs, token]);
+  }, [pdfs, isAuthenticated]);
 
   const navigate = (
     nextView,
@@ -156,31 +157,41 @@ export default function App() {
     };
   }, []);
 
-  useEffect(() => {
-    if (!token) return;
-
-    fetch(`${API}/pdfs`, {
-      headers: {
-        Authorization: `Bearer ${token}`
-      }
+  const loadPdfs = () => {
+    setIsLoadingPdfs(true);
+    return fetch(`${API}/pdfs`, {
+      credentials: "include"
     })
       .then(res => {
         if (!res.ok) throw new Error("Unauthorized");
         return res.json();
       })
-      .then(setPdfs)
+      .then(data => {
+        setPdfs(data);
+        setIsAuthenticated(true);
+      })
       .catch(() => {
-        logout();
+        setIsAuthenticated(false);
+        setPdfs([]);
+      })
+      .finally(() => {
+        setIsLoadingPdfs(false);
       });
-  }, [token]);
+  };
 
   useEffect(() => {
-    if (!current || !token) return;
+    loadPdfs();
+  }, []);
+
+  useEffect(() => {
+    if (!current || !isAuthenticated) return;
     setPdfUrl(`${API}/pdf/${current}`);
     return () => setPdfUrl(null);
-  }, [current, token]);
+  }, [current, isAuthenticated]);
 
   const login = async () => {
+    if (isLoadingPdfs) return;
+
     const form = new URLSearchParams();
     form.append("username", username);
     form.append("password", password);
@@ -199,14 +210,13 @@ export default function App() {
       return;
     }
 
-    const { access_token } = await res.json();
-    localStorage.setItem("token", access_token);
-    setToken(access_token);
+    setPassword("");
+    await loadPdfs();
   };
 
   const logout = () => {
-    localStorage.removeItem("token");
-    setToken(null);
+    fetch(`${API}/logout`, { method: "POST", credentials: "include" }).catch(() => {});
+    setIsAuthenticated(false);
     setPdfs([]);
     setCurrent(null);
     setCurrentPage(1);
@@ -238,7 +248,7 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (!token || view !== "search") return;
+    if (!isAuthenticated || view !== "search") return;
     if (!routeQuery.trim()) {
       setGroupResults([]);
       setGroupTotal(0);
@@ -264,7 +274,7 @@ export default function App() {
             per_page: String(DETAILS_PER_PAGE)
           });
           const res = await fetch(`${API}/search/pdf?${params.toString()}`, {
-            headers: { Authorization: `Bearer ${token}` }
+            credentials: "include"
           });
           if (!res.ok) throw new Error("search failed");
           const data = await res.json();
@@ -280,7 +290,7 @@ export default function App() {
             per_page: String(GROUPS_PER_PAGE)
           });
           const res = await fetch(`${API}/search?${params.toString()}`, {
-            headers: { Authorization: `Bearer ${token}` }
+            credentials: "include"
           });
           if (!res.ok) throw new Error("search failed");
           const data = await res.json();
@@ -307,9 +317,9 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [token, view, routeQuery, groupPage, selectedPdf, detailPage]);
+  }, [isAuthenticated, view, routeQuery, groupPage, selectedPdf, detailPage]);
 
-  if (!token) {
+  if (!isAuthenticated) {
     return (
       <div className="login">
         <h2>Login</h2>
@@ -324,7 +334,15 @@ export default function App() {
           value={password}
           onChange={e => setPassword(e.target.value)}
         />
-        <button onClick={login}>Login</button>
+        <button onClick={login} disabled={isLoadingPdfs}>
+          {isLoadingPdfs ? "Loading..." : "Login"}
+        </button>
+        {isLoadingPdfs && (
+          <div className="loading-inline">
+            <span className="spinner" aria-hidden="true" />
+            <span className="status">読み込み中...</span>
+          </div>
+        )}
       </div>
     );
   }
@@ -541,6 +559,12 @@ export default function App() {
               </div>
             ))}
           </div>
+          {isLoadingPdfs && (
+            <div className="loading-inline status-inline">
+              <span className="spinner" aria-hidden="true" />
+              <span className="status">読み込み中...</span>
+            </div>
+          )}
         </>
       )}
 

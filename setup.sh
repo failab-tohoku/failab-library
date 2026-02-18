@@ -1,4 +1,4 @@
-sudo dnf install -y docker git
+sudo dnf install -y docker git python3-pip
 sudo systemctl enable --now docker
 sudo usermod -aG docker ec2-user
 
