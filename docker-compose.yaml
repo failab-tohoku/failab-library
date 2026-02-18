@@ -4,13 +4,25 @@ services:
   backend:
     build: ./backend
     container_name: backend
+    environment:
+      SECRET_KEY: ${SECRET_KEY}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-60}
+      ADMIN_USERNAME: ${ADMIN_USERNAME}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      ADMIN_PASSWORD_HASH: ${ADMIN_PASSWORD_HASH}
+      USER_USERNAME: ${USER_USERNAME:-}
+      USER_PASSWORD: ${USER_PASSWORD:-}
+      USER_PASSWORD_HASH: ${USER_PASSWORD_HASH:-}
     expose:
       - "8000"
+    volumes:
+      - ./backend/app/resources:/app/app/resources
 
   nginx:
     build: .
     container_name: nginx
     ports:
       - "80:80"
+      - "443:443"
     depends_on:
       - backend

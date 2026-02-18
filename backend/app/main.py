@@ -4,12 +4,17 @@ import sqlite3
 from contextlib import closing
 
 import fitz
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.security import OAuth2PasswordRequestForm
 
-from .auth import authenticate_user, create_access_token, get_current_user
+from .auth import (
+    authenticate_user,
+    create_access_token,
+    decode_current_user,
+    get_current_user,
+)
 
 app = FastAPI()
 
@@ -34,19 +39,31 @@ TOKENS = set()
 
 
 @app.post("/login")
-def login(form: OAuth2PasswordRequestForm = Depends()):
+def login(response: Response, form: OAuth2PasswordRequestForm = Depends()):
     user = authenticate_user(form.username, form.password)
     if not user:
         raise HTTPException(status_code=401)
     token = create_access_token({"sub": user["username"], "role": user["role"]})
+    response.set_cookie(
+        key="access_token",
+        value=token,
+        httponly=True,
+        samesite="lax",
+        secure=False,
+        max_age=60 * 60,
+    )
     return {"access_token": token, "token_type": "bearer"}
 
 
 def generate_thumbnail(pdf_path, thumb_path):
     doc = fitz.open(pdf_path)
     page = doc.load_page(0)
-    pix = page.get_pixmap(matrix=fitz.Matrix(3, 3))
-    pix.save(thumb_path)
+    # Generate lightweight thumbnails (target width around 320px) for faster list loading.
+    target_width = 320
+    zoom = target_width / max(page.rect.width, 1)
+    zoom = min(max(zoom, 0.3), 1.0)
+    pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+    pix.save(thumb_path, jpg_quality=72)
 
 
 def get_db_connection():
@@ -188,7 +205,8 @@ def list_pdfs(user=Depends(get_current_user)):
             continue
 
         pdf_id = file
-        thumb_name = file.replace(".pdf", ".png")
+        file_stem, _ = os.path.splitext(file)
+        thumb_name = f"{file_stem}.jpg"
         thumb_path = os.path.join(THUMB_DIR, thumb_name)
 
         if not os.path.exists(thumb_path):
@@ -201,22 +219,47 @@ def list_pdfs(user=Depends(get_current_user)):
     return pdfs
 
 
+def resolve_user_from_request(request: Request):
+    token = None
+    auth_header = request.headers.get("authorization", "")
+    prefix = "Bearer "
+    if auth_header.startswith(prefix):
+        token = auth_header[len(prefix) :].strip()
+    if not token:
+        token = request.cookies.get("access_token")
+    if not token:
+        raise HTTPException(status_code=401)
+    decode_current_user(token)
+    return token
+
+
 @app.get("/pdf/{pdf_id}")
-def get_pdf(pdf_id: str, user=Depends(get_current_user)):
+def get_pdf(pdf_id: str, request: Request):
+    resolve_user_from_request(request)
+
     path = resolve_safe_path(PDF_DIR, pdf_id, ".pdf")
     if not os.path.exists(path):
         raise HTTPException(status_code=404)
 
-    return FileResponse(path, media_type="application/pdf")
+    return FileResponse(
+        path,
+        media_type="application/pdf",
+        headers={"Cache-Control": "private, max-age=300"},
+    )
 
 
 @app.get("/thumbnail/{thumb_name}")
-def get_thumbnail(thumb_name: str, user=Depends(get_current_user)):
-    path = resolve_safe_path(THUMB_DIR, thumb_name, ".png")
+def get_thumbnail(thumb_name: str, request: Request):
+    resolve_user_from_request(request)
+    path = resolve_safe_path(THUMB_DIR, thumb_name, ".jpg")
     if not os.path.exists(path):
         raise HTTPException(status_code=404)
 
-    return FileResponse(path, media_type="image/png")
+    return FileResponse(
+        path,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "private, max-age=3600"},
+    )
 
 
 @app.get("/search")

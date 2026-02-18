@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import "./App.css";
 
 const API = "/api";
@@ -79,7 +79,6 @@ export default function App() {
   const [current, setCurrent] = useState(null);
   const [currentPage, setCurrentPage] = useState(1);
   const [pdfUrl, setPdfUrl] = useState(null);
-  const [thumbnails, setThumbnails] = useState({});
 
   const [searchQuery, setSearchQuery] = useState(initialRoute.q);
   const [searchError, setSearchError] = useState("");
@@ -94,7 +93,16 @@ export default function App() {
   const [detailTotal, setDetailTotal] = useState(0);
   const [detailTotalPages, setDetailTotalPages] = useState(0);
 
-  const pdfUrlRef = useRef(null);
+  const buildAuthUrl = path => `${API}${path}`;
+
+  const thumbnailUrls = useMemo(() => {
+    const map = {};
+    if (!token) return map;
+    for (const p of pdfs) {
+      map[p.id] = buildAuthUrl(p.thumbnail_url);
+    }
+    return map;
+  }, [pdfs, token]);
 
   const navigate = (
     nextView,
@@ -167,58 +175,9 @@ export default function App() {
   }, [token]);
 
   useEffect(() => {
-    if (!token || pdfs.length === 0) return;
-    let revokedUrls = [];
-    (async () => {
-      const results = {};
-      for (const p of pdfs) {
-        const res = await fetch(`${API}${p.thumbnail_url}`, {
-          headers: {
-            Authorization: `Bearer ${token}`
-          }
-        });
-        if (!res.ok) continue;
-        const blob = await res.blob();
-        const url = URL.createObjectURL(blob);
-        results[p.id] = url;
-        revokedUrls.push(url);
-      }
-      setThumbnails(results);
-    })();
-    return () => {
-      revokedUrls.forEach(url => URL.revokeObjectURL(url));
-    };
-  }, [pdfs, token]);
-
-  useEffect(() => {
     if (!current || !token) return;
-    let cancelled = false;
-    (async () => {
-      const res = await fetch(`${API}/pdf/${current}`, {
-        headers: {
-          Authorization: `Bearer ${token}`
-        }
-      });
-      if (!res.ok) return;
-
-      const blob = await res.blob();
-      if (cancelled) return;
-      const url = URL.createObjectURL(blob);
-      if (pdfUrlRef.current) {
-        URL.revokeObjectURL(pdfUrlRef.current);
-      }
-      pdfUrlRef.current = url;
-      setPdfUrl(url);
-    })();
-
-    return () => {
-      cancelled = true;
-      if (pdfUrlRef.current) {
-        URL.revokeObjectURL(pdfUrlRef.current);
-        pdfUrlRef.current = null;
-      }
-      setPdfUrl(null);
-    };
+    setPdfUrl(`${API}/pdf/${current}`);
+    return () => setPdfUrl(null);
   }, [current, token]);
 
   const login = async () => {
@@ -228,6 +187,7 @@ export default function App() {
 
     const res = await fetch(`${API}/login`, {
       method: "POST",
+      credentials: "include",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded"
       },
@@ -426,8 +386,8 @@ export default function App() {
                   }
                 >
                   <div className="group-item-left">
-                    {thumbnails[item.id] ? (
-                      <img className="group-thumb" src={thumbnails[item.id]} />
+                    {thumbnailUrls[item.id] ? (
+                      <img className="group-thumb" src={thumbnailUrls[item.id]} />
                     ) : (
                       <div className="group-thumb placeholder">...</div>
                     )}
@@ -458,8 +418,8 @@ export default function App() {
                 >
                   Back
                 </button>
-                {thumbnails[selectedPdf] ? (
-                  <img className="detail-thumb" src={thumbnails[selectedPdf]} />
+                {thumbnailUrls[selectedPdf] ? (
+                  <img className="detail-thumb" src={thumbnailUrls[selectedPdf]} />
                 ) : (
                   <div className="detail-thumb placeholder">...</div>
                 )}
@@ -572,8 +532,8 @@ export default function App() {
           <div className="grid">
             {pdfs.map(p => (
               <div key={p.id} className="thumb-card" onClick={() => openPdf(p.id)}>
-                {thumbnails[p.id] ? (
-                  <img src={thumbnails[p.id]} />
+                {thumbnailUrls[p.id] ? (
+                  <img src={thumbnailUrls[p.id]} />
                 ) : (
                   <div className="thumb-placeholder">Loading...</div>
                 )}
