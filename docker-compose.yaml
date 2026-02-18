@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   backend:
     build: ./backend
@@ -7,12 +5,14 @@ services:
     environment:
       SECRET_KEY: ${SECRET_KEY}
       ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-60}
-      ADMIN_USERNAME: ${ADMIN_USERNAME}
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
-      ADMIN_PASSWORD_HASH: ${ADMIN_PASSWORD_HASH}
       USER_USERNAME: ${USER_USERNAME:-}
-      USER_PASSWORD: ${USER_PASSWORD:-}
       USER_PASSWORD_HASH: ${USER_PASSWORD_HASH:-}
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      LOGIN_RATE_LIMIT_WINDOW_SECONDS: ${LOGIN_RATE_LIMIT_WINDOW_SECONDS:-300}
+      LOGIN_RATE_LIMIT_MAX_ATTEMPTS: ${LOGIN_RATE_LIMIT_MAX_ATTEMPTS:-5}
+      LOGIN_RATE_LIMIT_BLOCK_SECONDS: ${LOGIN_RATE_LIMIT_BLOCK_SECONDS:-300}
+      SEARCH_INDEX_SYNC_MIN_INTERVAL_SECONDS: ${SEARCH_INDEX_SYNC_MIN_INTERVAL_SECONDS:-30}
+      PREWARM_THUMBNAILS_ON_STARTUP: ${PREWARM_THUMBNAILS_ON_STARTUP:-true}
     expose:
       - "8000"
     volumes:
@@ -24,5 +24,7 @@ services:
     ports:
       - "80:80"
       - "443:443"
+    volumes:
+      - ./backend/app/resources/pdfs:/data/pdfs:ro
     depends_on:
       - backend
