@@ -303,13 +303,29 @@ def build_fts_query(q: str):
     if not normalized:
         raise HTTPException(status_code=400, detail="query is required")
 
-    tokens = re.findall(r"[0-9A-Za-z_一-龯ぁ-ゔァ-ヴー々〆〤]+", normalized)
-    if not tokens:
+    parts = []
+    token_re = r"[0-9A-Za-z_一-龯ぁ-ゔァ-ヴー々〆〤]+"
+    for m in re.finditer(rf'"([^"]+)"|({token_re})', normalized):
+        phrase = m.group(1)
+        token = m.group(2)
+
+        if phrase is not None:
+            clean_phrase = phrase.strip()
+            if clean_phrase:
+                escaped = clean_phrase.replace('"', '""')
+                parts.append(f'content:"{escaped}"')
+            continue
+
+        if token is None:
+            continue
+
+        # Prefix search on each token for practical partial matching.
+        parts.append(f"content:{token}*" if len(token) >= 2 else f"content:{token}")
+
+    if not parts:
         escaped = normalized.replace('"', '""')
         return f'content:"{escaped}"'
 
-    # Prefix search on each token for practical partial matching.
-    parts = [f"content:{token}*" if len(token) >= 2 else f"content:{token}" for token in tokens]
     return " AND ".join(parts)
 
 
@@ -494,7 +510,14 @@ def search_pdf_details(
                 pdf_id,
                 title,
                 page,
-                snippet(pdf_index, 3, '[', ']', ' ... ', 10) AS snippet,
+                snippet(
+                    pdf_index,
+                    3,
+                    '__CODX_HIT_START__',
+                    '__CODX_HIT_END__',
+                    ' ... ',
+                    10
+                ) AS snippet,
                 bm25(pdf_index) AS score
             FROM pdf_index
             WHERE pdf_index MATCH ? AND pdf_id = ?

@@ -23,20 +23,73 @@ function getRouteState() {
 
 function tokenizeQuery(query) {
   if (!query) return [];
-  return (
-    query
-      .match(/[0-9A-Za-z_一-龯ぁ-ゔァ-ヴー々〆〤]+/g)
-      ?.map(v => v.trim())
-      .filter(Boolean) || []
-  );
+  const parts = [];
+  const re = /"([^"]+)"|([0-9A-Za-z_一-龯ぁ-ゔァ-ヴー々〆〤]+)/g;
+  for (const m of query.matchAll(re)) {
+    const phrase = m[1]?.trim();
+    const token = m[2]?.trim();
+    if (phrase) {
+      parts.push(phrase);
+      continue;
+    }
+    if (token) {
+      parts.push(token);
+    }
+  }
+  return parts;
 }
 
 function escapeRegExp(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+const SNIPPET_HIT_START = "__CODX_HIT_START__";
+const SNIPPET_HIT_END = "__CODX_HIT_END__";
+
+function parseMarkedSnippet(snippet) {
+  const text = snippet || "";
+  if (!text.includes(SNIPPET_HIT_START) || !text.includes(SNIPPET_HIT_END)) return null;
+
+  const parts = [];
+  let i = 0;
+  let hasHit = false;
+
+  while (i < text.length) {
+    const start = text.indexOf(SNIPPET_HIT_START, i);
+    if (start < 0) {
+      if (i < text.length) parts.push({ text: text.slice(i), hit: false });
+      break;
+    }
+
+    if (start > i) {
+      parts.push({ text: text.slice(i, start), hit: false });
+    }
+
+    const hitTextStart = start + SNIPPET_HIT_START.length;
+    const end = text.indexOf(SNIPPET_HIT_END, hitTextStart);
+    if (end < 0) {
+      return null;
+    }
+
+    parts.push({ text: text.slice(hitTextStart, end), hit: true });
+    hasHit = true;
+    i = end + SNIPPET_HIT_END.length;
+  }
+
+  return hasHit ? parts : null;
+}
+
 function toHighlightedParts(snippet, query) {
-  const cleanSnippet = (snippet || "").replaceAll("[", "").replaceAll("]", "");
+  const markedParts = parseMarkedSnippet(snippet);
+  if (markedParts) {
+    return markedParts;
+  }
+
+  const cleanSnippet = (snippet || "")
+    .replaceAll(SNIPPET_HIT_START, "")
+    .replaceAll(SNIPPET_HIT_END, "")
+    .replaceAll("[", "")
+    .replaceAll("]", "");
   const tokens = tokenizeQuery(query);
   if (!tokens.length || !cleanSnippet) {
     return [{ text: cleanSnippet, hit: false }];
