@@ -1,4 +1,4 @@
-# pdf_library
+# failab-library
 
 PDF閲覧と全文検索のWebアプリです。
 
